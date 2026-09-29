@@ -39,7 +39,7 @@ impl StreamingMode {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AudioConfig {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
@@ -52,7 +52,7 @@ pub struct AudioConfig {
     pub rope_parameters: RopeParameters,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RopeParameters {
     pub rope_theta: f64,
     pub partial_rotary_factor: f64,

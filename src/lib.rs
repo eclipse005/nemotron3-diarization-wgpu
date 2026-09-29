@@ -29,8 +29,10 @@
 //! the layout used by the sibling `qwen3-asr-wgpu` project.
 
 mod config;
+mod encoder;
 mod error;
 mod mel;
+mod tensor;
 mod weights;
 
 pub use config::{
@@ -41,4 +43,5 @@ pub use error::{DiarizationError, Result};
 pub use mel::{
     frame_count, log_mel, mel_filters, slaney_mel_filterbank, Padding, LOG_ZERO_GUARD_VALUE,
 };
+pub use encoder::Tower;
 pub use weights::Weights;

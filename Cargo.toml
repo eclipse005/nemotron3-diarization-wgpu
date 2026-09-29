@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "front_end_check"
 path = "src/bin/front_end_check.rs"
 
+[[bin]]
+name = "encoder_check"
+path = "src/bin/encoder_check.rs"
+
 [dependencies]
 wgpu = "30.0.1"
 pollster = "0.4"
