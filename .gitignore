@@ -1,0 +1,11 @@
+# build output
+/target/
+
+# the Python reference baseline lives in the parent directory; it is read, never copied
+# into this tree, but the validation output lands here
+/validation/
+*.npy
+
+# editor / OS
+.DS_Store
+*.swp
