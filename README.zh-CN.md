@@ -138,6 +138,9 @@ FRAME_CHECK_GPU=1 cargo run --release --bin frame_check <参考目录> <文件�
 `gpu_check` 更细一层，逐个核做对拍——GEMM、attention、QKV、rope、softmax，以及 encoder 的
 区间 embedding。`front_end_check`、`encoder_check`、`head_check`、`compress_check` 覆盖中间的各个阶段。
 
+`export_cache.py` 是本仓库里唯一的 Python 文件，用来重新生成 `head_check` 与 `compress_check`
+所对拍的说话人缓存 dump，需要 PyTorch 和参考项目——所以构建和使用本 crate 都不需要它。
+
 参考树由另一个封装了官方 transformers 代码的项目产出；跑推理不需要它，只有对拍才需要。
 
 ### 为什么用 wgpu？

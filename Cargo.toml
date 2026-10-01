@@ -13,10 +13,6 @@ name = "nemotron3_diarization_wgpu"
 path = "src/lib.rs"
 
 [[bin]]
-name = "spike"
-path = "src/main.rs"
-
-[[bin]]
 name = "front_end_check"
 path = "src/bin/front_end_check.rs"
 

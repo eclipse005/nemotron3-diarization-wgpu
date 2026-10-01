@@ -127,6 +127,8 @@ It reports, per mode, the worst per-logit `maxdiff`, the number of `sigmoid > 0.
 
 `gpu_check` goes one level down and probes individual kernels — GEMM, attention, QKV, rope, softmax, and the encoder's range embedding. `front_end_check`, `encoder_check`, `head_check` and `compress_check` cover the stages in between.
 
+`export_cache.py` is the one Python file in this repository. It regenerates the speaker-cache dumps that `head_check` and `compress_check` compare against, and needs PyTorch plus the reference project — so it is not required to build or run the crate.
+
 The reference tree is produced by a separate project that wraps the official transformers code; it is not needed to run inference, only to verify against it.
 
 ### Why wgpu?
