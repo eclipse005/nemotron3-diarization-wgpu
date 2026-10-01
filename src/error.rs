@@ -38,6 +38,9 @@ pub enum DiarizationError {
     #[error("unsupported audio: {0}")]
     UnsupportedAudio(String),
 
+    #[error("bad .npy: {0}")]
+    Npy(String),
+
     #[error("gpu: {0}")]
     Gpu(String),
 }

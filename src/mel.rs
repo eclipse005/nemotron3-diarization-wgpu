@@ -26,6 +26,7 @@
 //! | `true`  (offline, first streaming chunk) | `floor(L / hop)` |
 //! | `false` (later streaming chunks)          | `floor((L - n_fft) / hop) + 1` |
 
+use rayon::prelude::*;
 use rustfft::{num_complex::Complex, FftPlanner};
 
 use crate::config::FeatureExtractorConfig;
@@ -200,24 +201,22 @@ pub fn log_mel(
 
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(n_fft);
-    let mut buf = vec![Complex::new(0.0f32, 0.0f32); n_fft];
 
     let mut out = vec![0.0f32; n_frames * n_mels];
-    for t in 0..n_frames {
+    out.par_chunks_mut(n_mels).enumerate().for_each(|(t, row)| {
+        let mut buf = vec![Complex::new(0.0f32, 0.0f32); n_fft];
         let start = t * hop;
         for j in 0..n_fft {
             buf[j] = Complex::new(padded[start + j] * frame_window[j], 0.0);
         }
         fft.process(&mut buf);
-        // power spectrum
         for k in 0..n_freqs {
-            let (re, im) = (buf[k].re, buf[k].im);
-            let power = re * re + im * im;
+            let power = buf[k].re * buf[k].re + buf[k].im * buf[k].im;
             for m in 0..n_mels {
-                out[t * n_mels + m] += filters[m * n_freqs + k] * power;
+                row[m] += filters[m * n_freqs + k] * power;
             }
         }
-    }
+    });
 
     for v in out.iter_mut() {
         *v = (*v + LOG_ZERO_GUARD_VALUE).ln();

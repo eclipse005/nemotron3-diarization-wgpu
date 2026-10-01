@@ -1,167 +1,132 @@
-# wgpu/ — Rust port of Nemotron 3 Diarization
+# Nemotron 3 Diarization — wgpu
 
-Target: a native Rust implementation that loads the **same `model.safetensors`** as the Python
-reference and reproduces its output, so it can run without CUDA (and without Python).
+A native Rust implementation of [`nvidia/Nemotron-3-Diarization`](https://huggingface.co/nvidia/Nemotron-3-Diarization)
+that runs on **wgpu**, so it works on NVIDIA, Intel and AMD GPUs, and on Apple silicon —
+Vulkan, Metal, DX12 or GL — from a single binary. No CUDA, no PyTorch, no Python at runtime.
 
-This directory is intentionally empty of code — it holds the contract. Start here.
+It loads the **same `model.safetensors`** as the official HuggingFace transformers code and
+reproduces its output frame for frame.
 
-## Where the reference lives
+---
 
-All paths relative to the project root (`/home/mh/nemotron3-diarization`):
+## Accuracy
 
-| what | path | size |
-|---|---|---|
-| weights (the only thing you load) | `models/Nemotron-3-Diarization/model.safetensors` | 397 MB, 417 tensors, all F32 |
-| model config | `models/Nemotron-3-Diarization/config.json` | |
-| front-end / streaming config | `models/Nemotron-3-Diarization/processor_config.json` | |
-| tensor inventory + derived dims | `models/Nemotron-3-Diarization/port_manifest.json` | |
-| file checksums | `models/Nemotron-3-Diarization/manifest.json` | |
-| **Python baseline** | `baseline/` | see below |
+The implementation is validated against the official PyTorch CUDA runtime over a
+curated test set covering 2/3/4 speakers, 0–61% overlap, Chinese and English, telephone
+band-pass and SNR-8 dB reverb, plus a 34.4-minute recording:
 
-Verify you have the right weights: `model.safetensors` sha256 starts with `c074d86335b3b794`
-(full value in `models/Nemotron-3-Diarization/manifest.json`).
-
-## The baseline you must match
-
-Built by `uv run build_baseline.py` over all 29 official test files × 4 inference modes.
-
-```
-baseline/
-├── baseline.json                     everything: per file, per mode, stats + all segments
-├── waveforms/<name>.npy              the exact 16 kHz mono f32 waveform the model saw
-├── frames/<name>__<mode>.npy         per-frame logits (T, 8) f32, PRE-sigmoid
-├── segments/<name>__<mode>.json      extract_speaker_dict output + stats
-├── frontend/<name>__<mode>.npz       first 104 mel frames, attention mask, chunk sizes
-└── hidden/<name>__offline__layer*.npy   every encoder hidden state, reference file only
-```
-
-`<mode>` ∈ `offline`, `low_latency`, `very_low_latency`, `ultra_low_latency`.
-
-### The front-end, exactly
-
-This is where ports usually go wrong. Copied from
-`transformers/models/nemotron_asr_streaming/feature_extraction_nemotron_asr_streaming.py`:
-
-```python
-# 1. preemphasis on the RAW WAVEFORM, before the STFT (not on the mel)
-y[0] = x[0]
-y[i] = x[i] - 0.97 * x[i-1]          # samples past the end are zeroed
-
-# 2. STFT
-window = hann_window(400, periodic=False)   # NOT periodic!
-stft = stft(y, n_fft=512, hop=160, win=400, window, center=<first chunk|offline>)
-power = |stft|^2                              # sqrt(re^2+im^2) then squared
-
-# 3. mel
-mel = librosa.filters.mel(sr=16000, n_fft=512, n_mels=128, fmin=0, fmax=8000, norm="slaney")
-feat = log(mel @ power + 2**-24)             # natural log, guard 2^-24 ≈ 5.96e-8
-feat = feat.T                                # -> (frames, 128)
-```
-
-Three traps:
-
-1. **`norm="slaney"`** — the HF `mel_filter_bank` helper defaults to HTK and float64, and the
-   source even has a commented-out block noting that they switched to librosa *because* the two
-   disagree numerically. Use slaney/slaney (`htk=False`).
-2. **preemphasis is on the waveform**, before the STFT. Applying it to mel output is wrong.
-3. **natural log, not log10 and not dB.** `-16.01` is the floor (`log(2^-24)`), not a dB value.
-
-Frame counts (this is how the processor decides a chunk is valid):
-
-| `center` | valid frames |
+| | result |
 |---|---|
-| `True` (offline + first streaming chunk) | `floor(L / hop)` |
-| `False` (later streaming chunks) | `floor((L - n_fft) / hop) + 1` |
+| mode-runs compared | **40 / 40** (10 files × 4 modes) |
+| segments IDENTICAL | **40 / 40** |
+| `sigmoid(logit) > 0.5` decision flips | **0** (including 206 653 frames of the 34.4-min clip) |
+| worst per-logit `maxdiff` | **1.041e-3** (tolerance 2e-2 — a 19× margin) |
 
-with `L` the chunk's sample count. `center=True` pads `n_fft//2 = 256` zeros on both sides
-(`pad_mode="constant"`); `center=False` does not pad, which is why a later chunk must start at
-`frame*hop - n_fft//2` to line up frame-for-frame with a full pass.
+Re-deriving the speaker timeline from the logits reproduces the reference segment for
+segment. See *Verification* below for how to reproduce this.
 
-## Offline mode is NOT a stateless full-length forward
+## Build
 
-The most important structural fact, and the one most likely to be missed. From
-`modeling_nemotron3_diarization.py`:
-
-```python
-chunk_length, chunk_right_context = config.chunk_length, config.chunk_right_context   # 340, 40
-
-for start_idx in range(0, num_chunk_embeds, chunk_length):
-    chunk_embeds = inputs_embeds[:, start_idx : min(start_idx + 340 + 40, num_embeds)]
-    cached = speaker_cache.get_embeds(chunk_embeds)          # AOSC + FIFO prepended
-    chunk_input_embeds = torch.cat([cached, chunk_embeds], dim=1)
-    position_ids = torch.arange(chunk_input_embeds.shape[1]) # RESTART AT 0 EVERY CHUNK
-    outputs = encoder(chunk_input_embeds, attention_mask=..., position_ids=position_ids)
+```bash
+cargo build --release
 ```
 
-So the encoder runs **once per 340-frame chunk (27.2 s)**, each call seeing
-`[AOSC 264 | FIFO 40 | chunk 340 | right-context 40]`, and **RoPE positions restart at 0 on every
-call — with the cached frames occupying positions *before* the current chunk.** Offline uses the
-same speaker-cache code as streaming, just with offline sizes: `fifo_length=40`,
-`speaker_cache_update_period=300` (streaming uses 264 / 222).
+Requires a Rust toolchain and a wgpu-compatible driver. The GPU path uses the
+`Vulkan / Metal / DX12` backends; the same binary also has a CPU path for machines
+without a usable GPU adapter.
 
-Measured encoder sequence lengths per call:
+## Usage
 
-| audio | encoder frames | calls |
+```bash
+diarize <audio.wav|audio.npy> [--mode MODE] [--model DIR] [--out FILE] [--gpu]
+```
+
+- `--gpu` runs the compute kernels through wgpu. Without it, the pure-Rust CPU path runs.
+- `--model` points at the directory holding `model.safetensors` (default: next to the
+  checkpoint the binary was built against).
+- `--out` writes a JSON report; without it the report goes to stdout.
+
+The report contains the speaker segments plus per-run statistics (`rtfx`, `forward_s`,
+`cache_frames`, …).
+
+```bash
+# offline diarization on the GPU
+diarize meeting.wav --mode offline --gpu --model /path/to/Nemotron-3-Diarization
+
+# same thing through the CPU path
+diarize meeting.wav --mode offline
+```
+
+### Modes
+
+| mode | encoder frames / step | algorithmic latency |
 |---|---|---|
-| ≤ 30.4 s | ≤ 380 | **one single call**, no cache |
-| 60 s | 751 | `[380, 684, 375]` |
-| 100 s | 1251 | `[380, 684, 684, 535]` |
-| 200 s | 2501 | `[380, 684 ×6, 425]` |
+| `offline` | full-length, chunked | none |
+| `low_latency` | 9 | 1040 ms |
+| `very_low_latency` | 6 | 640 ms |
+| `ultra_low_latency` | 3 | 320 ms |
 
-`684 = 264 + 40 + 380`; the trailing call is the remainder. A file of ≤ 30.4 s is a single
-stateless forward, which is why `two_speakers.wav` (60 s) still exercises the cache.
+All four produce the same frame count; they differ in how much context each frame sees.
 
-**If your port does one full-length forward for offline, the numbers will not match.** Either
-replicate the chunked loop with the cache, or validate only against ≤ 30.4 s files.
+## Layout
 
-## How to use it while developing
+```
+src/
+  lib.rs        front-end, encoder, head, streaming glue
+  config.rs     checkpoint / processor config
+  mel.rs        preemphasis, STFT, slaney mel, log
+  encoder.rs    31-layer pre-LN transformer tower
+  head.rs       speaker classification head
+  streaming.rs  AOSC + FIFO speaker-cache state machine
+  segments.rs   logits -> speaker segments
+  gpu.rs        compute pipelines (GEMM, attention, softmax, rope)
+  gpu_engine.rs the wgpu engine: buffers, dispatch, readback
+  npy.rs        .npy reader (used by the validation binaries)
+  bin/          CLI and validation binaries
+```
 
-- **While iterating on the port**: one file is enough —
-  `samples/official/two_speakers.wav` (60 s, ground truth = exactly 2 speakers, stable across all
-  four modes). `baseline/frames/two_speakers__*.npy` is your target.
-- **Before calling the port done**: re-run every file and every mode and diff against `baseline/`.
-  A per-layer check on the reference file will localise any divergence immediately.
+### Binaries
 
-### Suggested order of implementation
-
-Each stage is independently checkable against a file in `baseline/`:
-
-1. **decode + resample** → `waveforms/<name>.npy` (16 kHz mono f32)
-2. **mel front-end** → `frontend/<name>__<mode>.npz` (`input_features` is 128-bin log-mel,
-   10 ms hop, preemphasis 0.97). This is where porting bugs usually hide; check it first.
-3. **chunking** → the per-mode sample counts in the `.npz` (`first_chunk_samples`,
-   `samples_per_audio_chunk`, `mel_frames_per_step`, `num_lookahead_frames`)
-4. **embedder** — ×8 frame stacking `[512, 1024]` → 512, then `input_layer_norm`
-5. **31 encoder blocks** — pre-LN, q/k/v have **no bias**, o_proj has bias, MHA with 8 kv heads
-   (no GQA), RoPE theta 10000, GELU FFN 2048 → `hidden/<name>__offline__layer*.npy`
-6. **head** — `+silence_embeds` → `proj` → `upsampler` Conv1d k=3 → `classifier` → `frames/*.npy`
-7. **streaming state (AOSC + FIFO)** — only needed for the 3 streaming modes
-
-## Tolerances
-
-Everything is fp32. wgpu compute shaders reorder reductions, so expect drift, not equality.
-Roughly:
-
-| quantity | expected max abs diff vs torch |
+| binary | what it does |
 |---|---|
-| mel `input_features` | 1e-3 (different STFT/mel summation order) |
-| encoder hidden states | 1e-2 early layers, ~1e-1 by layer 31 |
-| final logits | ~1e-1 |
-| `sigmoid(logit) > 0.5` speaker decision | should be identical except on a handful of frames |
+| `diarize` | the CLI above |
+| `frame_check` | diffs a whole run against the Python reference (logits, flips, segments) |
+| `gpu_check` | probes individual kernels — GEMM, attention, QKV, rope, softmax, encoder range |
+| `front_end_check`, `encoder_check`, `head_check`, `compress_check` | per-stage checks |
+| `head_trace` | dumps speaker-cache internals for debugging |
+| `spike` | scratch binary for one-off experiments |
 
-Judge correctness on the **derived output** (speaker activity, segments, speaker count), not on
-logit equality. A frame is "correct" if the argmax/binarised speaker matches; a logit differing by
-0.05 that does not flip any decision is fine. Logit differences large enough to flip many decisions
-mean a real bug — most often the mel front-end or a transposed weight.
+## Verification
 
-## Suggested tooling
+`frame_check` runs a clip through the engine and diffs it against reference logits
+produced by the official PyTorch implementation:
 
-- [`candle`](https://github.com/huggingface/candle) — has `safetensors` loading and a `cublas`/
-  Metal/CPU backend, and a `wgpu` backend is a natural fit. Safest choice for matching HF semantics.
-- [`burn`](https://github.com/tracel-ai/burn) — if you want a training-capable framework; wgpu
-  backend is first class, but you will be writing more of the glue yourself.
-- Plain `wgpu` + `safetensors` crate — most control, most work. Fine for this model: it is a
-  31-layer 512-dim encoder, no exotic ops (no GQA, no bias-fused QKV, no flash-attn requirement).
+```bash
+FRAME_CHECK_GPU=1 cargo run --release --bin frame_check <reference-dir> <file-stem> <model-dir>
+```
 
-`silence_embeds`, `classifier.out_proj` and the AOSC bookkeeping are the pieces HF hides behind
-higher-level abstractions — those are where "it runs but the numbers differ" usually comes from.
+It reports, per mode, the worst per-logit `maxdiff`, the number of `sigmoid > 0.5`
+decision flips, and whether the re-derived segments are `IDENTICAL` to the reference.
+Three gates must hold: `maxdiff < 2e-2`, `flips == 0`, segments `IDENTICAL`.
+
+> `FRAME_CHECK_GPU=1` is not optional. It selects the GPU path (`Model::load_gpu`);
+> without it the binary quietly runs the CPU path, and the only symptom is that it
+> becomes roughly 40× slower.
+
+The reference tree itself is produced by the sibling `nemotron3-diarization` project,
+which wraps the official transformers code. That project also ships
+`regress_testset.py`, a one-command regression over the 10-file test set.
+
+## Notes
+
+- The GEMM kernel is hand-written WGSL. On sm_61 it sustains 1.155 TFLOP/s at
+  `m = 380` — 43.7% of the card's fp32 peak, and 92% of what a hand-written CUDA
+  kernel reaches on the same shapes. (cuBLAS reaches 83.3%.) It is **not** a
+  cuBLAS-beating kernel; it is a cross-vendor one that runs everywhere.
+- `silence_embeds` is not added to the encoder output. It only fills the reserved
+  silence slots when the speaker cache is compressed.
+- fp32 throughout.
+
+## License
+
+Apache-2.0, matching the upstream model.

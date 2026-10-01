@@ -24,6 +24,30 @@ path = "src/bin/front_end_check.rs"
 name = "encoder_check"
 path = "src/bin/encoder_check.rs"
 
+[[bin]]
+name = "head_trace"
+path = "src/bin/head_trace.rs"
+
+[[bin]]
+name = "compress_check"
+path = "src/bin/compress_check.rs"
+
+[[bin]]
+name = "head_check"
+path = "src/bin/head_check.rs"
+
+[[bin]]
+name = "frame_check"
+path = "src/bin/frame_check.rs"
+
+[[bin]]
+name = "diarize"
+path = "src/bin/diarize.rs"
+
+[[bin]]
+name = "gpu_check"
+path = "src/bin/gpu_check.rs"
+
 [dependencies]
 wgpu = "30.0.1"
 pollster = "0.4"

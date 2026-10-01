@@ -58,7 +58,7 @@ pub struct RopeParameters {
     pub partial_rotary_factor: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct HeadConfig {
     pub audio_hidden_size: usize,
     pub hidden_size: usize,
@@ -66,7 +66,7 @@ pub struct HeadConfig {
     pub subsampling_factor: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct StreamingConfig {
     pub fifo_length: usize,
     pub speaker_cache_length: usize,
@@ -77,6 +77,10 @@ pub struct StreamingConfig {
     pub strong_boost_rate: f32,
     pub weak_boost_rate: f32,
     pub latest_frames_score_boost: f32,
+    /// Mirrors `audio_config.subsampling_factor`; the cache pools at its own rate.
+    pub subsampling_factor: usize,
+    /// Mirrors `head_config.num_speakers`; the cache is budgeted per speaker.
+    pub num_speakers: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +130,8 @@ pub struct ModeParams {
     pub hop_length: usize,
     /// `feature_extractor.n_fft`.
     pub n_fft: usize,
+    /// Mel frames per encoder frame, the processor's `subsampling_factor`.
+    pub subsampling: usize,
     /// Mel frames the processor must be fed per chunk.
     pub mel_frames_per_chunk: usize,
     /// Mel frames actually scored per step.
@@ -153,6 +159,7 @@ impl ModeParams {
                 mode,
                 hop_length: hop,
                 n_fft,
+                subsampling: sub,
                 mel_frames_per_chunk: 0,
                 mel_frames_per_step: 0,
                 lookahead_encoder_frames: 0,
@@ -168,13 +175,19 @@ impl ModeParams {
             mode,
             hop_length: hop,
             n_fft,
+            subsampling: sub,
             mel_frames_per_chunk: mel_per_chunk,
             mel_frames_per_step: mel_per_step,
             lookahead_encoder_frames: right_ctx,
-            // centred: `floor(L / hop)` valid frames, so L = (frames - 1) * hop + win
-            first_chunk_samples: (mel_per_chunk - 1) * hop + win,
-            // uncentred: `floor((L - n_fft) / hop) + 1 == mel_per_chunk`
-            samples_per_chunk: mel_per_chunk * hop + n_fft,
+            // Centred: `torch.stft` emits `floor(L / hop) + 1` frames and the
+            // processor trims the extra one, so ask for `floor(L / hop) == M`.
+            // The processor's own formula is `(M - 1) * hop + win_length / 2`.
+            first_chunk_samples: (mel_per_chunk - 1) * hop + win / 2,
+            // Uncentred: `floor((L - n_fft) / hop) + 1 == M`, so `L = M * hop + n_fft`.
+            // The processor's formula uses `win_length` here, not `n_fft` — the
+            // window is 400 samples but the transform is 512, and using `n_fft`
+            // silently produces one mel frame too many.
+            samples_per_chunk: mel_per_chunk * hop + win,
             latency_ms: (chunk_len + right_ctx) * 80,
         }
     }
@@ -182,8 +195,15 @@ impl ModeParams {
     /// First audio sample of the chunk that *starts* at mel frame `mel_frame_idx`.
     ///
     /// Uncentred windows begin `n_fft / 2` samples before the frame they belong to.
+    /// The step is one **hop**, not one whole step's worth of audio: consecutive
+    /// chunks overlap by the 32 mel frames the model holds back as look-ahead.
     pub fn audio_chunk_start(&self, mel_frame_idx: usize) -> usize {
-        mel_frame_idx * self.step_samples() - self.n_fft / 2
+        mel_frame_idx * self.hop_length - self.n_fft / 2
+    }
+
+    /// Scored encoder frames per step — the streaming mode's "chunk length".
+    pub fn chunk_encoder_frames(&self) -> usize {
+        self.mel_frames_per_step / self.subsampling
     }
 
     /// Samples of audio consumed per step: `mel_frames_per_step * hop_length`.

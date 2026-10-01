@@ -31,7 +31,14 @@
 mod config;
 mod encoder;
 mod error;
+mod gpu;
+mod gpu_engine;
+mod head;
 mod mel;
+mod model;
+mod npy;
+mod segments;
+mod streaming;
 mod tensor;
 mod weights;
 
@@ -44,4 +51,14 @@ pub use mel::{
     frame_count, log_mel, mel_filters, slaney_mel_filterbank, Padding, LOG_ZERO_GUARD_VALUE,
 };
 pub use encoder::Tower;
+pub use gpu_engine::GpuEngine;
+pub use gpu_engine::{
+    S_ADD, S_ALL, S_ATTN, S_FC1, S_FC2, S_GELU, S_LN, S_O, S_PV, S_QK, S_QKV,
+    S_ROPE, S_SM,
+};
+pub use head::{Head, HeadTrace};
+pub use model::{Chunk, ChunkTrace, Model, RunOutput};
+pub use npy::{read_f32, read_f32_bytes, Array};
+pub use segments::{activity_stats, extract_speaker_dict, frame_duration, Segment};
+pub use streaming::{CacheConfig, CompressTrace, SpeakerCache};
 pub use weights::Weights;

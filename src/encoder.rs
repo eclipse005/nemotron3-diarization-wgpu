@@ -115,12 +115,31 @@ impl Tower {
     /// The last group is zero-padded, matching `nn.functional.pad` in the reference.
     /// The 1024-vector is **time-major**: `[f0(128), f1(128), …, f7(128)]`.
     pub fn embed(&self, input_features: &[f32], num_frames: usize) -> Vec<f32> {
-        let (sub, mels, h) = (self.cfg.subsampling_factor, self.cfg.num_mel_bins, self.cfg.hidden_size);
-        let groups = num_frames.div_ceil(sub);
-        let stacked = groups * sub * mels;
-        let mut buf = vec![0.0f32; stacked];
-        buf[..num_frames * mels].copy_from_slice(&input_features[..num_frames * mels]);
+        self.embed_range(input_features, num_frames, 0, num_frames.div_ceil(self.cfg.subsampling_factor))
+    }
 
+    /// Encoder groups `lo..hi` only. Group `g` reads mel frames `g*sub .. g*sub+sub`,
+    /// so a range is a contiguous slice of `input_features` and the projection is
+    /// the same `linear` call on a shorter row count — no per-group index math, and
+    /// **bit-identical to the corresponding slice of [`embed`]** because each output
+    /// row is a dot product over the same operands in the same order.
+    pub fn embed_range(
+        &self,
+        input_features: &[f32],
+        num_frames: usize,
+        lo: usize,
+        hi: usize,
+    ) -> Vec<f32> {
+        let (sub, mels, h) = (self.cfg.subsampling_factor, self.cfg.num_mel_bins, self.cfg.hidden_size);
+        let groups = hi - lo;
+        // frames past `num_frames` stay zero, exactly as the whole-recording form
+        // does — that padding is load-bearing (it lands in the last group).
+        let end_mel = (hi * sub).min(num_frames);
+        let mut buf = vec![0.0f32; groups * sub * mels];
+        if lo * sub < end_mel {
+            let src = &input_features[lo * sub * mels..end_mel * mels];
+            buf[..src.len()].copy_from_slice(src);
+        }
         linear(&buf, groups, sub * mels, &self.embed_proj, h, None)
     }
 
@@ -178,15 +197,29 @@ impl Tower {
         position_offset: usize,
         snapshot_layers: &[usize],
     ) -> (Vec<f32>, Vec<LayerSnapshot>) {
+        let embeds = self.embed(input_features, num_frames);
+        self.forward_embeds(&embeds, valid_frames, position_offset, snapshot_layers)
+    }
+
+    /// [`forward`](Self::forward) for a caller that already holds the embedder output.
+    ///
+    /// Offline mode needs this: the reference runs `embedder` **once** over the whole
+    /// recording and only then slices the result into chunks, so re-embedding per
+    /// chunk would not be the same computation.
+    pub fn forward_embeds(
+        &self,
+        inputs_embeds: &[f32],
+        valid_frames: Option<usize>,
+        position_offset: usize,
+        snapshot_layers: &[usize],
+    ) -> (Vec<f32>, Vec<LayerSnapshot>) {
         let h = self.cfg.hidden_size;
         let nh = self.cfg.num_attention_heads;
         let hd = h / nh;
-        let groups = num_frames.div_ceil(self.cfg.subsampling_factor);
+        let groups = inputs_embeds.len() / h;
         let valid = valid_frames.unwrap_or(groups).min(groups);
 
-        let embeds = self.embed(input_features, num_frames);
-        let mut x = layer_norm(&embeds, groups, h, &self.input_ln_w, &self.input_ln_b);
-
+        let mut x = layer_norm(inputs_embeds, groups, h, &self.input_ln_w, &self.input_ln_b);
         let (cos, sin) = self.rope_tables(groups, position_offset);
         let mut snapshots = Vec::new();
 

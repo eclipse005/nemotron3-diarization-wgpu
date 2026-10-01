@@ -1,11 +1,17 @@
 # build output
 /target/
 
-# the Python reference baseline lives in the parent directory; it is read, never copied
-# into this tree, but the validation output lands here
+# validation scratch — the reference tree lives in the sibling nemotron3-diarization
+# checkout and is read, never copied in here
 /validation/
 *.npy
+*.npz
+
+# the model weights are downloaded, never committed
+/models/
+/weights/
 
 # editor / OS
 .DS_Store
 *.swp
+*~
